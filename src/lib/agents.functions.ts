@@ -172,11 +172,12 @@ Decide the most PRECISE final call by weighing where they agree, where they dive
     };
     try {
       const { text } = await generateText({
-        model: gateway("google/gemini-2.5-pro"),
-        system: "You are a senior portfolio manager synthesizing analyst views into one precise call.",
+        model: gateway("google/gemini-3-flash-preview"),
+        system: "You are a senior portfolio manager synthesizing analyst views into one precise call. Reply with JSON only, no prose.",
         prompt: judgePrompt,
       });
-      const m = text.match(/\{[\s\S]*\}/);
+      console.log(`[judge] text length=${text?.length ?? 0}`);
+      const m = text?.match(/\{[\s\S]*\}/);
       if (m) {
         const j = JSON.parse(m[0]);
         verdict = {
@@ -187,8 +188,11 @@ Decide the most PRECISE final call by weighing where they agree, where they dive
           disagreements: Array.isArray(j.disagreements) ? j.disagreements.map(String) : [],
           action_plan: Array.isArray(j.action_plan) ? j.action_plan.map(String) : [],
         };
+      } else {
+        verdict.summary = text?.slice(0, 400) || "Judge returned no parseable output.";
       }
     } catch (e) {
+      console.error(`[judge] error:`, e);
       verdict.summary = e instanceof Error ? e.message : String(e);
     }
 

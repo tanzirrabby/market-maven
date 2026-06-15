@@ -214,30 +214,40 @@ export const getWorldBank = createServerFn({ method: "POST" })
     country: (d.country ?? "USA").toUpperCase().slice(0, 3),
   }))
   .handler(async ({ data }) => {
-    const out: Record<string, { year: number; value: number | null }[]> = {};
-    await Promise.all(
-      Object.entries(INDICATORS).map(async ([key, code]) => {
-        const url = `https://api.worldbank.org/v2/country/${data.country}/indicator/${code}?format=json&per_page=10`;
-        try {
-          const res = await fetch(url);
-          if (!res.ok) {
+    const cacheKey = `wb:${data.country}`;
+    const cached = cacheGet<{ country: string; indicators: Record<string, { year: number; value: number | null }[]> }>(cacheKey);
+    if (cached) return cached;
+
+    return dedupe(cacheKey, async () => {
+      const out: Record<string, { year: number; value: number | null }[]> = {};
+      await Promise.all(
+        Object.entries(INDICATORS).map(async ([key, code]) => {
+          await takeToken();
+          const url = `https://api.worldbank.org/v2/country/${data.country}/indicator/${code}?format=json&per_page=10`;
+          try {
+            const res = await fetch(url);
+            if (!res.ok) {
+              out[key] = [];
+              return;
+            }
+            const json = (await res.json()) as unknown;
+            const series = Array.isArray(json) && Array.isArray(json[1]) ? json[1] : [];
+            out[key] = series
+              .map((r: { date: string; value: number | null }) => ({
+                year: Number(r.date),
+                value: r.value,
+              }))
+              .filter((r) => r.value !== null)
+              .slice(0, 6)
+              .reverse();
+          } catch {
             out[key] = [];
-            return;
           }
-          const json = (await res.json()) as unknown;
-          const series = Array.isArray(json) && Array.isArray(json[1]) ? json[1] : [];
-          out[key] = series
-            .map((r: { date: string; value: number | null }) => ({
-              year: Number(r.date),
-              value: r.value,
-            }))
-            .filter((r) => r.value !== null)
-            .slice(0, 6)
-            .reverse();
-        } catch {
-          out[key] = [];
-        }
-      }),
-    );
-    return { country: data.country, indicators: out };
+        }),
+      );
+      const result = { country: data.country, indicators: out };
+      // World Bank data updates infrequently — cache 6 hours
+      cacheSet(cacheKey, result, 6 * 60 * 60_000);
+      return result;
+    });
   });

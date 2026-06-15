@@ -1,12 +1,8 @@
 import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 
-const SYMBOL = z.string().min(1).max(12).regex(/^[A-Za-z0-9.\-^]+$/);
-
-function stooqSymbol(s: string) {
-  const sym = s.trim().toLowerCase();
-  return sym.includes(".") ? sym : `${sym}.us`;
-}
+const SYMBOL = z.string().min(1).max(16).regex(/^[A-Za-z0-9.\-^=]+$/);
+const UA = "Mozilla/5.0 (compatible; QuantumTradeBot/1.0)";
 
 export type Quote = {
   symbol: string;
@@ -21,60 +17,79 @@ export type Quote = {
   changePct: number;
 };
 
+type YahooChart = {
+  chart: {
+    result?: Array<{
+      meta: {
+        symbol: string;
+        regularMarketPrice?: number;
+        chartPreviousClose?: number;
+        previousClose?: number;
+        regularMarketTime?: number;
+        regularMarketDayHigh?: number;
+        regularMarketDayLow?: number;
+        regularMarketVolume?: number;
+        gmtoffset?: number;
+      };
+      timestamp?: number[];
+      indicators?: {
+        quote?: Array<{
+          open?: (number | null)[];
+          high?: (number | null)[];
+          low?: (number | null)[];
+          close?: (number | null)[];
+          volume?: (number | null)[];
+        }>;
+      };
+    }>;
+    error?: { code: string; description: string } | null;
+  };
+};
+
+async function fetchChart(symbol: string, range: string, interval: string): Promise<YahooChart["chart"]["result"] extends (infer T)[] | undefined ? T | null : never> {
+  const hosts = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+  for (const host of hosts) {
+    const url = `https://${host}/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}`;
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": UA, Accept: "application/json" } });
+      if (!res.ok) continue;
+      const json = (await res.json()) as YahooChart;
+      const result = json.chart?.result?.[0];
+      if (result) return result as never;
+    } catch {
+      /* try next host */
+    }
+  }
+  return null as never;
+}
+
+function quoteFromChart(symbol: string, r: NonNullable<YahooChart["chart"]["result"]>[number]): Quote | null {
+  const meta = r.meta;
+  const close = meta.regularMarketPrice;
+  const prev = meta.chartPreviousClose ?? meta.previousClose;
+  if (typeof close !== "number" || typeof prev !== "number") return null;
+  const ts = meta.regularMarketTime ? new Date(meta.regularMarketTime * 1000) : new Date();
+  const iso = ts.toISOString();
+  return {
+    symbol: (meta.symbol ?? symbol).toUpperCase(),
+    date: iso.slice(0, 10),
+    time: iso.slice(11, 19),
+    open: prev,
+    high: meta.regularMarketDayHigh ?? close,
+    low: meta.regularMarketDayLow ?? close,
+    close,
+    volume: meta.regularMarketVolume ?? 0,
+    change: +(close - prev).toFixed(4),
+    changePct: prev ? +(((close - prev) / prev) * 100).toFixed(2) : 0,
+  };
+}
+
 export const getQuote = createServerFn({ method: "POST" })
   .inputValidator((d: { symbol: string }) => ({ symbol: SYMBOL.parse(d.symbol) }))
   .handler(async ({ data }): Promise<Quote | null> => {
-    const sym = stooqSymbol(data.symbol);
-    const url = `https://stooq.com/q/l/?s=${sym}&f=sd2t2ohlcv&h&e=csv`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Quote fetch failed: ${res.status}`);
-    const text = await res.text();
-    const lines = text.trim().split("\n");
-    if (lines.length < 2) return null;
-    const row = lines[1].split(",");
-    if (row[0] === "N/D" || row.length < 8) return null;
-    const open = Number(row[3]);
-    const close = Number(row[6]);
-    return {
-      symbol: row[0].toUpperCase(),
-      date: row[1],
-      time: row[2],
-      open,
-      high: Number(row[4]),
-      low: Number(row[5]),
-      close,
-      volume: Number(row[7]),
-      change: +(close - open).toFixed(4),
-      changePct: open ? +(((close - open) / open) * 100).toFixed(2) : 0,
-    };
-  });
-
-export const getHistory = createServerFn({ method: "POST" })
-  .inputValidator((d: { symbol: string; interval?: "d" | "w" | "m" }) => ({
-    symbol: SYMBOL.parse(d.symbol),
-    interval: (d.interval ?? "d") as "d" | "w" | "m",
-  }))
-  .handler(async ({ data }) => {
-    const sym = stooqSymbol(data.symbol);
-    const url = `https://stooq.com/q/d/l/?s=${sym}&i=${data.interval}`;
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`History fetch failed: ${res.status}`);
-    const text = await res.text();
-    const lines = text.trim().split("\n").slice(1);
-    const rows = lines
-      .map((line) => {
-        const [date, open, high, low, close, volume] = line.split(",");
-        return {
-          date,
-          open: Number(open),
-          high: Number(high),
-          low: Number(low),
-          close: Number(close),
-          volume: Number(volume),
-        };
-      })
-      .filter((r) => Number.isFinite(r.close));
-    return rows.slice(-260); // ~1y daily
+    const r = await fetchChart(data.symbol, "5d", "1d");
+    if (!r) return null;
+    return quoteFromChart(data.symbol, r);
   });
 
 export const getQuotes = createServerFn({ method: "POST" })
@@ -84,34 +99,36 @@ export const getQuotes = createServerFn({ method: "POST" })
   .handler(async ({ data }): Promise<Quote[]> => {
     const results = await Promise.allSettled(
       data.symbols.map(async (symbol) => {
-        const sym = stooqSymbol(symbol);
-        const url = `https://stooq.com/q/l/?s=${sym}&f=sd2t2ohlcv&h&e=csv`;
-        const res = await fetch(url);
-        if (!res.ok) return null;
-        const text = await res.text();
-        const lines = text.trim().split("\n");
-        if (lines.length < 2) return null;
-        const row = lines[1].split(",");
-        if (row[0] === "N/D" || row.length < 8) return null;
-        const open = Number(row[3]);
-        const close = Number(row[6]);
-        return {
-          symbol: row[0].toUpperCase(),
-          date: row[1],
-          time: row[2],
-          open,
-          high: Number(row[4]),
-          low: Number(row[5]),
-          close,
-          volume: Number(row[7]),
-          change: +(close - open).toFixed(4),
-          changePct: open ? +(((close - open) / open) * 100).toFixed(2) : 0,
-        } as Quote;
+        const r = await fetchChart(symbol, "5d", "1d");
+        return r ? quoteFromChart(symbol, r) : null;
       }),
     );
     return results
       .map((r) => (r.status === "fulfilled" ? r.value : null))
       .filter((q): q is Quote => q !== null);
+  });
+
+export const getHistory = createServerFn({ method: "POST" })
+  .inputValidator((d: { symbol: string; interval?: "d" | "w" | "m" }) => ({
+    symbol: SYMBOL.parse(d.symbol),
+    interval: (d.interval ?? "d") as "d" | "w" | "m",
+  }))
+  .handler(async ({ data }) => {
+    const intervalMap = { d: "1d", w: "1wk", m: "1mo" } as const;
+    const r = await fetchChart(data.symbol, "1y", intervalMap[data.interval]);
+    if (!r || !r.timestamp) return [];
+    const q = r.indicators?.quote?.[0];
+    const rows = r.timestamp
+      .map((t, i) => ({
+        date: new Date(t * 1000).toISOString().slice(0, 10),
+        open: Number(q?.open?.[i] ?? NaN),
+        high: Number(q?.high?.[i] ?? NaN),
+        low: Number(q?.low?.[i] ?? NaN),
+        close: Number(q?.close?.[i] ?? NaN),
+        volume: Number(q?.volume?.[i] ?? 0),
+      }))
+      .filter((r) => Number.isFinite(r.close));
+    return rows;
   });
 
 // World Bank macro indicators

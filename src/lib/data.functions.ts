@@ -138,7 +138,7 @@ export const saveAnalysis = createServerFn({ method: "POST" })
       user_id: context.userId,
       symbol: data.symbol,
       question: data.question ?? null,
-      result: data.result as object,
+      result: data.result as never,
     });
     if (error) throw new Error(error.message);
     return { ok: true };

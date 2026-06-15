@@ -112,9 +112,18 @@ ${SCHEMA_HINT}`;
           system: agent.system,
           prompt: context,
         });
+        console.log(`[agent ${agent.id}] text length=${text?.length ?? 0}`);
+        if (!text || text.trim().length === 0) {
+          return {
+            id: agent.id, name: agent.name, model: agent.model,
+            recommendation: "UNKNOWN", confidence: 0, thesis: "", bullets: [],
+            error: "Model returned empty response",
+          };
+        }
         const parsed = safeParse(text);
         return { id: agent.id, name: agent.name, model: agent.model, ...parsed };
       } catch (e) {
+        console.error(`[agent ${agent.id}] error:`, e);
         return {
           id: agent.id,
           name: agent.name,
@@ -129,6 +138,8 @@ ${SCHEMA_HINT}`;
     });
 
     const agents = await Promise.all(calls);
+    console.log(`[agents] completed`, agents.map(a => ({ id: a.id, rec: a.recommendation, err: a.error })));
+
 
     // Judge: synthesize a single, precise call
     const judgePrompt = `Three analysts evaluated ${data.symbol}. Their JSON replies:
